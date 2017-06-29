@@ -1,0 +1,216 @@
+import numpy as np
+from collections import defaultdict
+import random
+import sys
+sys.path.append('/home/siddharth/thesis/code/irl/aima-python')
+from mdp import *
+from gui import *
+
+class MaxEntIRL:
+
+
+    def __init__(self, window_size = 80, grid_size = 2, cell_size = 1, gamma = 0.9):
+
+        self.window_size = window_size
+        self.grid_size = grid_size
+        self.cell_size = cell_size
+        pix_per_grid = (window_size/grid_size)
+        self.grid,self.actual_w = self.build_random(grid_size, cell_size)
+
+        self.mdp_gw = GridMDP(self.grid , terminals=[], gamma = gamma) #GridMDP flips grid like a noob
+        self.grid_gui = GuiBoard("SVM IRL", [window_size/self.grid_size*self.grid_size, window_size/self.grid_size*self.grid_size], pix_per_grid)
+        self.grid_gui.render_mdp(self.mdp_gw)
+    def macro_cell(self, x,y):
+        size = self.grid_size
+        cells = self.cell_size
+        cells_per_row = (size/cells)
+        return x/cells + y/cells * cells_per_row  
+
+    def grid_from_w(self, w):
+        '''
+        get grid world with rewards given the weigts to indicator features
+        '''
+        l = []
+        for i in xrange(self.grid_size):
+            l.append([0]*self.grid_size)
+        for i in xrange(self.grid_size):
+            for j in xrange(self.grid_size):
+                l[i][j] = w[self.macro_cell(i,j)]
+        return l
+
+
+
+
+    def get_maxent_policy(self, theta, N = 200):
+
+        '''
+        Implementation of step 1,2 and 3 of Ziebart et. al. Maximum Entropy Inverse Reinforcement Learning
+        '''
+
+
+        Zs = defaultdict(lambda:1, {}) #Initializing Z_s to 1
+        Za = {}
+        #[(1, self.go(state, action))]
+       
+        Zs_max_p = 1
+        for i in xrange(N):
+            self.grid_gui.render_move((0,0), delay = 0.0)
+            print i
+            Zs_copy = Zs.copy()
+            Zs_max = -float('inf')
+
+            for s in self.mdp_gw.states:
+     
+            	Zs_copy[s] = 0
+
+            	exp_reward = np.exp(theta[self.macro_cell(self.grid_size-1-s[1], s[0])]) #theta[.] is nothing but (theta^T).f, where f is the feature vector
+            	for a in self.mdp_gw.actions(s):
+                    Za[(s,a)] = 0
+                    for p,sk in self.mdp_gw.T(s,a):
+                        Za[(s,a)] += 1./Zs_max_p * Zs[sk]*p	# same as Za_{i,j} in the paper, Step 2 in algorithm
+                    Za[(s,a)] *= exp_reward
+                    Zs_copy[s] += Za[(s,a)]
+
+                if Zs_max < Zs_copy[s]:
+                    Zs_max = Zs_copy[s]
+                # print Zs[s], Zs_temp                   
+            Zs = Zs_copy # Step 2 second line in algorithm
+            Zs_max_p = Zs_max
+            print Zs
+
+            # input()
+            # print Za[((15,0),(0,1))], Za[((15,0),(0,-1))], Za[((15,0),(1,0))], Za[((15,0),(-1,0))]
+        
+        pi = {}
+
+        for s in self.mdp_gw.states:
+            pi[s] = {}
+            for a in self.mdp_gw.actions(s):
+                pi[s][a] = Za[(s,a)]/float(Zs[s]) # Step 3 in the algorithm in MaxEnt IRL paper
+        self.grid_gui.pi = pi
+
+        return pi
+
+    def execute_policy(self, s, pi):
+        current_state = s
+        for i in xrange(1000):
+            self.grid_gui.render_move(current_state, delay = 0.1)
+            A = [a for a in pi[current_state]]
+            p = [pi[current_state][a] for a in A]
+
+            sampled_index = np.random.choice(len(p), 1, p = p)[0]
+            sampled_action = A[sampled_index]
+            current_state = self.mdp_gw.go(current_state, sampled_action)
+
+
+
+    def build_random(self, size = 128, cells = 16):
+        '''
+        size is the size of the nxn grid (size = n)
+        cells is the number of grid points in one macro cell region. - should divide size exactly
+        '''
+        w = []
+        w_sum = 0
+        for i in xrange((size/cells)**2):
+            # if i < 32: 
+            #     w[i] = -1
+            
+            if random.uniform(0,1) < 0.3: # with probability 0.1
+                if random.uniform(0,1) < 0.6: # with probability 0.8
+                    w.append(-1)
+                else:
+                    w.append(random.uniform(0,1))
+            else:
+                w.append(0)
+            w_sum += abs(w[-1])
+
+        if len(w) > 4:
+            for i in xrange(len(w)):
+                w[i] = w[i]/float(w_sum)
+        else:
+            w[0] = 1
+            w[1] = -1
+            w[2] = w[3] = 0
+
+        # if len(w) > 4:
+        #     print kk
+
+        return self.grid_from_w(w),np.array(w)
+
+
+def get_expected_svf(mdp, pi, initial_distribution = {(0,0):1}):
+    
+    '''
+    get state visitation frequencies Algorithm 9.3 in Ziebart's thesis
+    '''
+    D = defaultdict(lambda:0, {}) # line 2 in Algorithm 9.3
+
+    while True: 
+        D_prime = initial_distribution.copy() # line 6
+        for s in mdp.states:
+            for a in mdp.actions(s):
+                for P, sz in mdp.T(s,a):
+                    D_prime[sz] = D_prime[sz] + D[s] * pi[s][a] * P
+        D = D_prime
+
+def soft_value_iteration(mdp, epsilon=0.001, seedV = None):
+
+    if seedV == None: V_soft = defaultdict(lambda:-float('inf'), {})
+    else: V_soft = seedV.copy()
+
+
+    R, T, gamma = mdp.R, mdp.T, mdp.gamma
+    
+    i = 0
+    Q_soft = {}
+
+    while True:
+        i+=1 
+        delta = 0
+        V_soft_prime = {s: R(s) for s in mdp.states}
+
+        for s in mdp.states:
+            for a in mdp.actions(s):
+                V_soft_prime[s] = soft_max_2(V_soft_prime[s], R(s) + gamma * sum([p * V_soft[s1] for (p, s1) in T(s, a)]))
+            delta = max(delta, abs(V_soft[s] - V_soft_prime[s]))
+        print V_soft[s]
+        if delta < epsilon * (1 - gamma) / gamma:
+
+            Q_soft = {}
+            pi = {}
+            for s in mdp.states:
+                pi[s] = {}
+                nomalizing_factor = 0
+                for a in mdp.actions(s):
+                    Q_soft[(s,a)] = R(s) + gamma * sum([p * V_soft[s1] for (p, s1) in T(s, a)])
+                    pi[s][a] = np.exp(Q_soft[(s,a)]-V_soft[s])
+                    nomalizing_factor += pi[s][a]
+                for a in mdp.actions(s): pi[s][a] = pi[s][a]/float(nomalizing_factor) # due to log-exp instability, probability may not be normalized. So normalizing here
+            return pi, Q_soft, V_soft_prime  
+
+        V_soft = V_soft_prime
+        
+
+def soft_max(l):
+    '''
+    l - list of elements to compute softmax
+    '''
+
+def soft_max_2(x1, x2):
+    '''
+    x1, x2 - 2 elements to compute millowmax as in Ziebart's thesis
+    '''
+    max_x = max(x1, x2)
+    min_x = min(x1, x2)
+
+    return max_x + np.log(1+np.exp(min_x-max_x))
+
+
+
+m = MaxEntIRL(window_size = 800, grid_size = 128, cell_size = 16, gamma = 0.9)
+pi, Q, V = soft_value_iteration(m.mdp_gw)
+print pi
+# sys.exit()
+# pi = m.get_maxent_policy(m.actual_w)
+m.execute_policy((0,0), pi)
+m.grid_gui.hold_gui()
